@@ -1,0 +1,2787 @@
+{
+  "schema_version": 1,
+  "title": "Efficient Transformer Systems: linear attention and 3:1 hybrids",
+  "status": "completed controlled reference-path experiment",
+  "question": "Under one 4-layer nanoGPT training budget, how do MHA, GQA, MQA, MLA, pure GDN/KDA, and Qwen3-Next-, Kimi-Linear-, and Kimi-K3-inspired 3:1 attention schedules trade validation quality, persistent-state memory, and reference-path latency against homogeneous MHA, GQA, MQA, and MLA baselines?",
+  "hypotheses": [
+    "At equal depth and width, GQA and MQA reduce the token-growing KV-cache slope in direct proportion to their two and one shared KV heads, versus four KV heads in MHA.",
+    "Pure GDN and KDA keep a context-independent recurrent state; their difference is scalar versus channel-wise forgetting, not state size.",
+    "Three recurrent layers make the hybrid state grow only through its one-in-four full-attention anchor.",
+    "KDA and GDN have the same fixed matrix-state size; KDA's channel-wise decay targets quality and memory control, not a smaller state.",
+    "The KDA/MLA hybrid approaches a 75% smaller long-context state than a four-layer MLA baseline, after a small fixed-state crossover.",
+    "Adding an output gate to the one-in-four MLA anchor leaves the KDA hybrid storage law unchanged, so measured quality and latency isolate the gate's effect within this prototype.",
+    "A sequential PyTorch scan may save persistent state without reproducing the optimized-kernel throughput reported for Qwen3-Next or Kimi Linear."
+  ],
+  "environment": {
+    "timestamp_utc": "2026-07-22T16:31:17.531989+00:00",
+    "python": "3.14.2",
+    "torch": "2.10.0",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "processor": "arm",
+    "device": "cpu",
+    "cuda_available": false,
+    "mps_available": false,
+    "torch_num_threads": 1
+  },
+  "experiment_config": {
+    "seed": 2026,
+    "split_fraction": 0.9,
+    "steps": 250,
+    "eval_interval": 200,
+    "eval_batches": 12,
+    "batch_size": 16,
+    "train_context": 64,
+    "block_size": 192,
+    "n_layer": 4,
+    "n_head": 4,
+    "n_embd": 128,
+    "gqa_n_kv_heads": 2,
+    "mla_latent_rank": 32,
+    "delta_conv_kernel": 4,
+    "kda_gate_rank": 32,
+    "dropout": 0.0,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.1,
+    "grad_clip": 1.0,
+    "inference_prompt_lengths": [
+      32,
+      64,
+      128
+    ],
+    "inference_decode_tokens": 32,
+    "inference_warmup": 1,
+    "inference_repeats": 7,
+    "num_threads": 1,
+    "training_mode": "full_epoch",
+    "epochs": 1
+  },
+  "dataset": {
+    "path": "../nanoGPT-lab/input.txt",
+    "sha256": "86c4e6aa9db7c042ec79f339dcb96d42b0075e16b8fc2e86bf0ca57e2dc565ed",
+    "vocab_size": 65,
+    "train_tokens": 1003854,
+    "validation_tokens": 111540
+  },
+  "controlled_variables": [
+    "four decoder layers",
+    "identical non-attention initial weights",
+    "same corpus split and hash",
+    "same seed and batch sequence",
+    "same training-token budget, optimizer, width, and evaluation tokens"
+  ],
+  "training_protocol": {
+    "mode": "full_epoch",
+    "epochs": 1,
+    "non_overlapping_windows_per_epoch": 15685,
+    "batches_per_epoch": 981,
+    "tokens_per_full_epoch": 1003840,
+    "trailing_tokens_outside_complete_window": 13,
+    "coverage": "Every complete non-overlapping train window is visited exactly once per epoch, including the final partial batch."
+  },
+  "implementation_boundary": "Operator-level GPT-2/nanoGPT prototype with learned positions and dense MLPs. It reproduces the core recurrent equations, short convolutions, gates, persistent states, and 3:1 token-mixer schedules, but not MoE, Attention Residuals, partial RoPE/NoPE, large-model recipes, or optimized chunkwise kernels. The Kimi-K3-inspired label refers only to the KDA x3 + gated-MLA attention schedule.",
+  "training_recipe_boundary": "One common AdamW parameter group applies weight decay uniformly, including to A_log and dt_bias. The official recurrent-layer recipes exclude those gate parameters from weight decay; this controlled prototype does not reproduce that optimizer grouping.",
+  "timing_session_boundary": "GQA and MQA were appended with deterministic resume in a second local session, and the Kimi-K3-inspired variant in a later session, on the same recorded CPU configuration. Quality and storage results remain reproducible, but small timing differences across all nine variants should not be treated as a single-session benchmark.",
+  "sources": {
+    "linear_transformer": "https://arxiv.org/abs/2006.16236",
+    "gated_deltanet": "https://arxiv.org/abs/2412.06464",
+    "gated_full_attention": "https://arxiv.org/abs/2505.06708",
+    "qwen3_next": "https://qwen.ai/blog?id=e34c4305036ce60d55a0791b170337c2b70ae51d",
+    "kimi_linear": "https://arxiv.org/abs/2510.26692",
+    "kimi_code": "https://github.com/MoonshotAI/Kimi-Linear",
+    "kimi_k3_launch": "https://www.kimi.com/blog/kimi-k3",
+    "attention_residuals": "https://arxiv.org/abs/2603.15031"
+  },
+  "variants": [
+    {
+      "variant": "MHA_4L",
+      "model_variant": "MHA",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "MHA",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 821632,
+      "attention_parameter_count": 262144,
+      "parameter_bytes": 3286528,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 37.904313,
+        "p95": 39.21428125,
+        "mean": 37.98510132889344,
+        "min": 14.480625,
+        "max": 43.193834
+      },
+      "training_tokens_per_second": 26938.94850153345,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.164174318313599,
+          "validation_loss": 4.1680589119593305,
+          "validation_perplexity": 64.58995555660186
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.5195176800092063,
+          "validation_loss": 2.4914487997690835,
+          "validation_perplexity": 12.078763159052814
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 2.3658342162768045,
+          "validation_loss": 2.364838739236196,
+          "validation_perplexity": 10.642322490072194
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 2.277339140574137,
+          "validation_loss": 2.292478402455648,
+          "validation_perplexity": 9.899442104339691
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 2.1857815782229104,
+          "validation_loss": 2.2416624824206033,
+          "validation_perplexity": 9.40896052364454
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 2.083406686782837,
+          "validation_loss": 2.133302867412567,
+          "validation_perplexity": 8.442705949996556
+        }
+      ],
+      "final_validation_loss": 2.133302867412567,
+      "final_validation_perplexity": 8.442705949996556,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 0,
+        "bytes_per_token": 4096,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "MHA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 1024,
+            "kv_heads": 4
+          },
+          {
+            "layer": 2,
+            "type": "MHA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 1024,
+            "kv_heads": 4
+          },
+          {
+            "layer": 3,
+            "type": "MHA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 1024,
+            "kv_heads": 4
+          },
+          {
+            "layer": 4,
+            "type": "MHA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 1024,
+            "kv_heads": 4
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 0.894,
+            "p95": 0.9221794999999999,
+            "mean": 0.8950834285714286,
+            "min": 0.86675,
+            "max": 0.932417
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.38944921875,
+            "p95": 0.400099334375,
+            "mean": 0.3880262276785714,
+            "min": 0.36899871875,
+            "max": 0.40254425
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.15145703125,
+            "p95": 1.156555084375,
+            "mean": 1.1475310625000001,
+            "min": 1.137359375,
+            "max": 1.1576640625
+          },
+          "decode_tokens_per_second_p50": 2567.7288638802797,
+          "decode_speedup_p50": 2.9566294546585223,
+          "end_to_end_speedup_p50": 2.7587294456766904,
+          "cache_occupied_bytes": 262144,
+          "cache_allocated_bytes": 786432,
+          "raw_timing_ms": {
+            "prefill": [
+              0.894,
+              0.891541,
+              0.932417,
+              0.894459,
+              0.898292,
+              0.888125,
+              0.86675
+            ],
+            "cached_decode_per_token": [
+              0.3813763125,
+              0.40254425,
+              0.39439453125,
+              0.36899871875,
+              0.38944921875,
+              0.39113803125,
+              0.38828253125
+            ],
+            "recompute_decode_per_token": [
+              1.137359375,
+              1.14076690625,
+              1.1516458125,
+              1.15145703125,
+              1.15396746875,
+              1.13985678125,
+              1.1576640625
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 1.387917,
+            "p95": 1.5905873999999998,
+            "mean": 1.4395715714285713,
+            "min": 1.371708,
+            "max": 1.636875
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.3844361875,
+            "p95": 0.40706105937500003,
+            "mean": 0.38967875892857146,
+            "min": 0.3752995,
+            "max": 0.40860284375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.69711065625,
+            "p95": 1.7208257875000001,
+            "mean": 1.6975094910714286,
+            "min": 1.663272125,
+            "max": 1.72650390625
+          },
+          "decode_tokens_per_second_p50": 2601.2119371566705,
+          "decode_speedup_p50": 4.41454449771329,
+          "end_to_end_speedup_p50": 3.9669858928587733,
+          "cache_occupied_bytes": 393216,
+          "cache_allocated_bytes": 786432,
+          "raw_timing_ms": {
+            "prefill": [
+              1.387917,
+              1.45075,
+              1.372709,
+              1.636875,
+              1.371708,
+              1.482583,
+              1.374459
+            ],
+            "cached_decode_per_token": [
+              0.3844361875,
+              0.38429296875,
+              0.40860284375,
+              0.4034635625,
+              0.39190625,
+              0.37975,
+              0.3752995
+            ],
+            "recompute_decode_per_token": [
+              1.68856903125,
+              1.70550521875,
+              1.69711065625,
+              1.72650390625,
+              1.69402865625,
+              1.70757684375,
+              1.663272125
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 2.52775,
+            "p95": 2.7491999,
+            "mean": 2.5731307142857145,
+            "min": 2.475,
+            "max": 2.798
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.387546875,
+            "p95": 0.412616146875,
+            "mean": 0.3910768169642857,
+            "min": 0.3782981875,
+            "max": 0.4182200625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 2.98880859375,
+            "p95": 3.17240521875,
+            "mean": 3.004860129464286,
+            "min": 2.91757684375,
+            "max": 3.23647396875
+          },
+          "decode_tokens_per_second_p50": 2580.33302423094,
+          "decode_speedup_p50": 7.7121215175583595,
+          "end_to_end_speedup_p50": 6.406341577775173,
+          "cache_occupied_bytes": 655360,
+          "cache_allocated_bytes": 786432,
+          "raw_timing_ms": {
+            "prefill": [
+              2.635333,
+              2.52775,
+              2.798,
+              2.51375,
+              2.486041,
+              2.576041,
+              2.475
+            ],
+            "cached_decode_per_token": [
+              0.4182200625,
+              0.39954034375,
+              0.3912486875,
+              0.3797708125,
+              0.38291275,
+              0.3782981875,
+              0.387546875
+            ],
+            "recompute_decode_per_token": [
+              2.98880859375,
+              2.9599323125,
+              3.02291146875,
+              2.9905325625,
+              2.91778515625,
+              3.23647396875,
+              2.91757684375
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "GQA_4L",
+      "model_variant": "GQA",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "GQA",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 756096,
+      "attention_parameter_count": 196608,
+      "parameter_bytes": 3024384,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 38.798271,
+        "p95": 40.25887525,
+        "mean": 38.893635980532785,
+        "min": 14.589334,
+        "max": 43.747709
+      },
+      "training_tokens_per_second": 26309.668991522576,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.2347724835077925,
+          "validation_loss": 4.234029730161031,
+          "validation_perplexity": 68.99470276724885
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.5147143602371216,
+          "validation_loss": 2.4845407207806907,
+          "validation_perplexity": 11.995609655238525
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 2.365518808364868,
+          "validation_loss": 2.3653717637062073,
+          "validation_perplexity": 10.647996620467985
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 2.2787704269091287,
+          "validation_loss": 2.289986252784729,
+          "validation_perplexity": 9.8748019292122
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 2.1841979225476584,
+          "validation_loss": 2.242850581804911,
+          "validation_perplexity": 9.420145947231337
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 2.0851961374282837,
+          "validation_loss": 2.137343962987264,
+          "validation_perplexity": 8.47689276121148
+        }
+      ],
+      "final_validation_loss": 2.137343962987264,
+      "final_validation_perplexity": 8.47689276121148,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 0,
+        "bytes_per_token": 2048,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "GQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 512,
+            "kv_heads": 2
+          },
+          {
+            "layer": 2,
+            "type": "GQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 512,
+            "kv_heads": 2
+          },
+          {
+            "layer": 3,
+            "type": "GQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 512,
+            "kv_heads": 2
+          },
+          {
+            "layer": 4,
+            "type": "GQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 512,
+            "kv_heads": 2
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 0.911417,
+            "p95": 0.9268877,
+            "mean": 0.9125418571428572,
+            "min": 0.896792,
+            "max": 0.928625
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.41244140625,
+            "p95": 0.42054257812499996,
+            "mean": 0.4108642098214285,
+            "min": 0.40159896875,
+            "max": 0.42212109375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.16636328125,
+            "p95": 1.1956118375,
+            "mean": 1.1626590357142859,
+            "min": 1.1360143125,
+            "max": 1.20334503125
+          },
+          "decode_tokens_per_second_p50": 2424.586825780177,
+          "decode_speedup_p50": 2.8279490457924896,
+          "end_to_end_speedup_p50": 2.645275445510563,
+          "cache_occupied_bytes": 131072,
+          "cache_allocated_bytes": 393216,
+          "raw_timing_ms": {
+            "prefill": [
+              0.922834,
+              0.928625,
+              0.896792,
+              0.898875,
+              0.906542,
+              0.922708,
+              0.911417
+            ],
+            "cached_decode_per_token": [
+              0.40159896875,
+              0.42212109375,
+              0.402740875,
+              0.41244140625,
+              0.4164270625,
+              0.416859375,
+              0.4038606875
+            ],
+            "recompute_decode_per_token": [
+              1.1419986875,
+              1.17116146875,
+              1.16636328125,
+              1.17756771875,
+              1.20334503125,
+              1.14216275,
+              1.1360143125
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 1.375167,
+            "p95": 1.4408582,
+            "mean": 1.3845178571428571,
+            "min": 1.359041,
+            "max": 1.465958
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.4108763125,
+            "p95": 0.413743865625,
+            "mean": 0.4106861964285714,
+            "min": 0.406490875,
+            "max": 0.41410284375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.675571625,
+            "p95": 1.6870764249999999,
+            "mean": 1.6767786517857142,
+            "min": 1.66583853125,
+            "max": 1.68776040625
+          },
+          "decode_tokens_per_second_p50": 2433.8224657329206,
+          "decode_speedup_p50": 4.078043863869616,
+          "end_to_end_speedup_p50": 3.691903903606978,
+          "cache_occupied_bytes": 196608,
+          "cache_allocated_bytes": 393216,
+          "raw_timing_ms": {
+            "prefill": [
+              1.465958,
+              1.365333,
+              1.377792,
+              1.382292,
+              1.359041,
+              1.375167,
+              1.366042
+            ],
+            "cached_decode_per_token": [
+              0.41410284375,
+              0.41290625,
+              0.406490875,
+              0.4102578125,
+              0.41231121875,
+              0.4108763125,
+              0.4078580625
+            ],
+            "recompute_decode_per_token": [
+              1.68776040625,
+              1.67452215625,
+              1.68548046875,
+              1.675571625,
+              1.66583853125,
+              1.67737240625,
+              1.67090496875
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 2.548833,
+            "p95": 2.6091337,
+            "mean": 2.544934428571429,
+            "min": 2.49,
+            "max": 2.622709
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.4262760625,
+            "p95": 0.43058411875,
+            "mean": 0.4253792857142857,
+            "min": 0.419571625,
+            "max": 0.4316185
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 2.9503138125,
+            "p95": 2.992588159375,
+            "mean": 2.9515967276785715,
+            "min": 2.92038671875,
+            "max": 3.00209246875
+          },
+          "decode_tokens_per_second_p50": 2345.897618869931,
+          "decode_speedup_p50": 6.921134147662819,
+          "end_to_end_speedup_p50": 5.831499931406866,
+          "cache_occupied_bytes": 327680,
+          "cache_allocated_bytes": 393216,
+          "raw_timing_ms": {
+            "prefill": [
+              2.508875,
+              2.622709,
+              2.49,
+              2.577458,
+              2.548833,
+              2.550625,
+              2.516041
+            ],
+            "cached_decode_per_token": [
+              0.419571625,
+              0.4262760625,
+              0.4273424375,
+              0.42125521875,
+              0.42342059375,
+              0.4281705625,
+              0.4316185
+            ],
+            "recompute_decode_per_token": [
+              2.9704114375,
+              3.00209246875,
+              2.9503138125,
+              2.92394009375,
+              2.92926171875,
+              2.96477084375,
+              2.92038671875
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "MQA_4L",
+      "model_variant": "MQA",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "MQA",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 723328,
+      "attention_parameter_count": 163840,
+      "parameter_bytes": 2893312,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 37.641812,
+        "p95": 39.1267395,
+        "mean": 37.81964895594262,
+        "min": 14.258083,
+        "max": 43.513334
+      },
+      "training_tokens_per_second": 27056.80028169066,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.173131426175435,
+          "validation_loss": 4.175465822219849,
+          "validation_perplexity": 65.07014372111077
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.5368816455205283,
+          "validation_loss": 2.504940370718638,
+          "validation_perplexity": 12.242828912945063
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 2.3624057173728943,
+          "validation_loss": 2.366565763950348,
+          "validation_perplexity": 10.660717924140949
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 2.2916943232218423,
+          "validation_loss": 2.3068473736445108,
+          "validation_perplexity": 10.042713770879015
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 2.2164647777875266,
+          "validation_loss": 2.2678966720898948,
+          "validation_perplexity": 9.659063255962064
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 2.138807793458303,
+          "validation_loss": 2.179736375808716,
+          "validation_perplexity": 8.843974465759596
+        }
+      ],
+      "final_validation_loss": 2.179736375808716,
+      "final_validation_perplexity": 8.843974465759596,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 0,
+        "bytes_per_token": 1024,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "MQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 256,
+            "kv_heads": 1
+          },
+          {
+            "layer": 2,
+            "type": "MQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 256,
+            "kv_heads": 1
+          },
+          {
+            "layer": 3,
+            "type": "MQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 256,
+            "kv_heads": 1
+          },
+          {
+            "layer": 4,
+            "type": "MQA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 256,
+            "kv_heads": 1
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 0.892958,
+            "p95": 0.9061456000000001,
+            "mean": 0.8961011428571428,
+            "min": 0.886667,
+            "max": 0.906208
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.39952734375,
+            "p95": 0.4125991,
+            "mean": 0.40021521875,
+            "min": 0.39051303125,
+            "max": 0.4168541875
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.1293294375,
+            "p95": 1.1547748625,
+            "mean": 1.133186013392857,
+            "min": 1.12156640625,
+            "max": 1.16261196875
+          },
+          "decode_tokens_per_second_p50": 2502.9575963785333,
+          "decode_speedup_p50": 2.8266636944045214,
+          "end_to_end_speedup_p50": 2.6421248161167052,
+          "cache_occupied_bytes": 65536,
+          "cache_allocated_bytes": 196608,
+          "raw_timing_ms": {
+            "prefill": [
+              0.903042,
+              0.906208,
+              0.887875,
+              0.886667,
+              0.892958,
+              0.906,
+              0.889958
+            ],
+            "cached_decode_per_token": [
+              0.39051303125,
+              0.3952669375,
+              0.39660678125,
+              0.4168541875,
+              0.4000676875,
+              0.4026705625,
+              0.39952734375
+            ],
+            "recompute_decode_per_token": [
+              1.16261196875,
+              1.13648828125,
+              1.12480990625,
+              1.13119790625,
+              1.1293294375,
+              1.1262981875,
+              1.12156640625
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 1.369667,
+            "p95": 1.5352042,
+            "mean": 1.412387,
+            "min": 1.355709,
+            "max": 1.550167
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.4055611875,
+            "p95": 0.40823047500000004,
+            "mean": 0.404375,
+            "min": 0.39876953125,
+            "max": 0.40876171875
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.679578125,
+            "p95": 1.690760934375,
+            "mean": 1.680120348214286,
+            "min": 1.66780728125,
+            "max": 1.6923046875
+          },
+          "decode_tokens_per_second_p50": 2465.7191832490134,
+          "decode_speedup_p50": 4.141368002577909,
+          "end_to_end_speedup_p50": 3.7460206828656313,
+          "cache_occupied_bytes": 98304,
+          "cache_allocated_bytes": 196608,
+          "raw_timing_ms": {
+            "prefill": [
+              1.365958,
+              1.500291,
+              1.355709,
+              1.366459,
+              1.550167,
+              1.378458,
+              1.369667
+            ],
+            "cached_decode_per_token": [
+              0.4067734375,
+              0.40234634375,
+              0.40699090625,
+              0.4055611875,
+              0.401421875,
+              0.40876171875,
+              0.39876953125
+            ],
+            "recompute_decode_per_token": [
+              1.66780728125,
+              1.68298828125,
+              1.67781771875,
+              1.68715884375,
+              1.679578125,
+              1.6731875,
+              1.6923046875
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 2.5115,
+            "p95": 2.6565331,
+            "mean": 2.5485534285714286,
+            "min": 2.488708,
+            "max": 2.672083
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.4150546875,
+            "p95": 0.41717552812500003,
+            "mean": 0.4136770803571429,
+            "min": 0.4085520625,
+            "max": 0.41727084375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 2.9111926875,
+            "p95": 2.9219345125,
+            "mean": 2.9103653258928572,
+            "min": 2.88636978125,
+            "max": 2.92479428125
+          },
+          "decode_tokens_per_second_p50": 2409.3210608541794,
+          "decode_speedup_p50": 7.013997854198429,
+          "end_to_end_speedup_p50": 5.898606429962167,
+          "cache_occupied_bytes": 163840,
+          "cache_allocated_bytes": 196608,
+          "raw_timing_ms": {
+            "prefill": [
+              2.532458,
+              2.62025,
+              2.488708,
+              2.5115,
+              2.672083,
+              2.509875,
+              2.505
+            ],
+            "cached_decode_per_token": [
+              0.4085520625,
+              0.41534503125,
+              0.41196875,
+              0.416953125,
+              0.4105950625,
+              0.4150546875,
+              0.41727084375
+            ],
+            "recompute_decode_per_token": [
+              2.90980078125,
+              2.91412109375,
+              2.9111926875,
+              2.91526171875,
+              2.9110169375,
+              2.92479428125,
+              2.88636978125
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "MLA_4L",
+      "model_variant": "MLA",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "MLA",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 739968,
+      "attention_parameter_count": 180480,
+      "parameter_bytes": 2959872,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 37.620459,
+        "p95": 40.480635,
+        "mean": 38.26931093237705,
+        "min": 14.951666,
+        "max": 155.13875
+      },
+      "training_tokens_per_second": 26738.88459430985,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.190478523572286,
+          "validation_loss": 4.194472988446553,
+          "validation_perplexity": 66.31877160710256
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.5324560006459556,
+          "validation_loss": 2.5161316196123757,
+          "validation_perplexity": 12.380610997243313
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 2.395890732606252,
+          "validation_loss": 2.4039841691652932,
+          "validation_perplexity": 11.067182185154783
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 2.31181792418162,
+          "validation_loss": 2.332484463850657,
+          "validation_perplexity": 10.303508454135962
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 2.2724741101264954,
+          "validation_loss": 2.3186381260553994,
+          "validation_perplexity": 10.161825752499704
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 2.195359388987223,
+          "validation_loss": 2.236627737681071,
+          "validation_perplexity": 9.361707861505627
+        }
+      ],
+      "final_validation_loss": 2.236627737681071,
+      "final_validation_perplexity": 9.361707861505627,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 0,
+        "bytes_per_token": 512,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "MLA latent cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 128,
+            "latent_rank": 32
+          },
+          {
+            "layer": 2,
+            "type": "MLA latent cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 128,
+            "latent_rank": 32
+          },
+          {
+            "layer": 3,
+            "type": "MLA latent cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 128,
+            "latent_rank": 32
+          },
+          {
+            "layer": 4,
+            "type": "MLA latent cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 128,
+            "latent_rank": 32
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 0.874833,
+            "p95": 0.9458456,
+            "mean": 0.8931488571428572,
+            "min": 0.868,
+            "max": 0.957833
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.409615875,
+            "p95": 0.416838140625,
+            "mean": 0.40625984821428573,
+            "min": 0.39085025,
+            "max": 0.418147125
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.16496484375,
+            "p95": 1.1716932187499998,
+            "mean": 1.1623854107142857,
+            "min": 1.1521770625,
+            "max": 1.1732565
+          },
+          "decode_tokens_per_second_p50": 2441.3116312935867,
+          "decode_speedup_p50": 2.844042223094991,
+          "end_to_end_speedup_p50": 2.666101604851364,
+          "cache_occupied_bytes": 32768,
+          "cache_allocated_bytes": 98304,
+          "raw_timing_ms": {
+            "prefill": [
+              0.917875,
+              0.957833,
+              0.869792,
+              0.874833,
+              0.868,
+              0.871834,
+              0.891875
+            ],
+            "cached_decode_per_token": [
+              0.39390365625,
+              0.41041534375,
+              0.40710284375,
+              0.409615875,
+              0.41378384375,
+              0.418147125,
+              0.39085025
+            ],
+            "recompute_decode_per_token": [
+              1.1732565,
+              1.16797265625,
+              1.16496484375,
+              1.1680455625,
+              1.15218096875,
+              1.15810028125,
+              1.1521770625
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 1.373125,
+            "p95": 1.4433536999999999,
+            "mean": 1.3912499999999999,
+            "min": 1.347083,
+            "max": 1.456791
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.4239674375,
+            "p95": 0.42770859375000003,
+            "mean": 0.4173919241071428,
+            "min": 0.3878515625,
+            "max": 0.42778125
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 1.70706640625,
+            "p95": 1.7239053562500002,
+            "mean": 1.708479174107143,
+            "min": 1.68559246875,
+            "max": 1.7270885625
+          },
+          "decode_tokens_per_second_p50": 2358.671708130887,
+          "decode_speedup_p50": 4.026409236322542,
+          "end_to_end_speedup_p50": 3.656346822169596,
+          "cache_occupied_bytes": 49152,
+          "cache_allocated_bytes": 98304,
+          "raw_timing_ms": {
+            "prefill": [
+              1.369042,
+              1.456791,
+              1.373125,
+              1.412,
+              1.368875,
+              1.411834,
+              1.347083
+            ],
+            "cached_decode_per_token": [
+              0.4275390625,
+              0.41573046875,
+              0.4239674375,
+              0.42597525,
+              0.4128984375,
+              0.3878515625,
+              0.42778125
+            ],
+            "recompute_decode_per_token": [
+              1.70706640625,
+              1.7069921875,
+              1.7270885625,
+              1.68559246875,
+              1.70908725,
+              1.716477875,
+              1.70704946875
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 2.487833,
+            "p95": 2.8259953999999996,
+            "mean": 2.5580592857142856,
+            "min": 2.412708,
+            "max": 2.937458
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 0.428703125,
+            "p95": 0.440667325,
+            "mean": 0.42299554017857144,
+            "min": 0.39592059375,
+            "max": 0.44114584375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 2.95805859375,
+            "p95": 3.013955359375,
+            "mean": 2.9672434955357145,
+            "min": 2.93783984375,
+            "max": 3.02653778125
+          },
+          "decode_tokens_per_second_p50": 2332.6165397091518,
+          "decode_speedup_p50": 6.900016401210045,
+          "end_to_end_speedup_p50": 5.840795385359538,
+          "cache_occupied_bytes": 81920,
+          "cache_allocated_bytes": 98304,
+          "raw_timing_ms": {
+            "prefill": [
+              2.565916,
+              2.484208,
+              2.487833,
+              2.937458,
+              2.473709,
+              2.544583,
+              2.412708
+            ],
+            "cached_decode_per_token": [
+              0.43955078125,
+              0.44114584375,
+              0.428703125,
+              0.40751303125,
+              0.430944,
+              0.39592059375,
+              0.41719140625
+            ],
+            "recompute_decode_per_token": [
+              2.984596375,
+              2.95344921875,
+              2.93937890625,
+              2.93783984375,
+              3.02653778125,
+              2.95805859375,
+              2.97084375
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "GDN_4L",
+      "model_variant": "GDN",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "GDN",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 897952,
+      "attention_parameter_count": 338464,
+      "parameter_bytes": 3591808,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 345.331042,
+        "p95": 357.19023925,
+        "mean": 346.38542989651637,
+        "min": 135.904875,
+        "max": 443.895708
+      },
+      "training_tokens_per_second": 2954.162040910028,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.19115670522054,
+          "validation_loss": 4.1946068207422895,
+          "validation_perplexity": 66.32764779450417
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.126442790031433,
+          "validation_loss": 2.1175894737243652,
+          "validation_perplexity": 8.311079247038354
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 1.8678075273831685,
+          "validation_loss": 1.9478907982508342,
+          "validation_perplexity": 7.013878283837497
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 1.7642008165518444,
+          "validation_loss": 1.878093997637431,
+          "validation_perplexity": 6.541025762815037
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 1.6743783553441365,
+          "validation_loss": 1.8411068618297577,
+          "validation_perplexity": 6.303511517391109
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 1.605574796597163,
+          "validation_loss": 1.777374029159546,
+          "validation_perplexity": 5.914305215986531
+        }
+      ],
+      "final_validation_loss": 1.777374029159546,
+      "final_validation_perplexity": 5.914305215986531,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 83968,
+        "bytes_per_token": 0,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 2,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 3,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 4,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 9.537125,
+            "p95": 9.8552955,
+            "mean": 9.59019642857143,
+            "min": 9.407417,
+            "max": 9.905583
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 3.63819921875,
+            "p95": 3.71815390625,
+            "mean": 3.6265011071428574,
+            "min": 3.54227603125,
+            "max": 3.7473359375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 12.676444,
+            "p95": 13.382062493749999,
+            "mean": 12.790620709821429,
+            "min": 12.57776821875,
+            "max": 13.65391015625
+          },
+          "decode_tokens_per_second_p50": 274.86125411889253,
+          "decode_speedup_p50": 3.4842632956079105,
+          "end_to_end_speedup_p50": 3.2204494936864627,
+          "cache_occupied_bytes": 83968,
+          "cache_allocated_bytes": 83968,
+          "raw_timing_ms": {
+            "prefill": [
+              9.737958,
+              9.470958,
+              9.537125,
+              9.407417,
+              9.905583,
+              9.422667,
+              9.649667
+            ],
+            "cached_decode_per_token": [
+              3.6500625,
+              3.553403625,
+              3.63819921875,
+              3.6485299375,
+              3.54227603125,
+              3.6057005,
+              3.7473359375
+            ],
+            "recompute_decode_per_token": [
+              12.57776821875,
+              12.59655859375,
+              12.676444,
+              13.65391015625,
+              12.58054034375,
+              12.74775128125,
+              12.701372375
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 15.568833,
+            "p95": 15.9503498,
+            "mean": 15.553815285714284,
+            "min": 15.2025,
+            "max": 16.04525
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 3.60376953125,
+            "p95": 3.7085577031250003,
+            "mean": 3.6204551741071427,
+            "min": 3.50612371875,
+            "max": 3.71104559375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 18.6518580625,
+            "p95": 18.92522135,
+            "mean": 18.689463910714288,
+            "min": 18.526421875,
+            "max": 19.0051236875
+          },
+          "decode_tokens_per_second_p50": 277.48722312249,
+          "decode_speedup_p50": 5.175652299837951,
+          "end_to_end_speedup_p50": 4.560026965655247,
+          "cache_occupied_bytes": 83968,
+          "cache_allocated_bytes": 83968,
+          "raw_timing_ms": {
+            "prefill": [
+              16.04525,
+              15.568833,
+              15.240375,
+              15.71525,
+              15.375583,
+              15.728916,
+              15.2025
+            ],
+            "cached_decode_per_token": [
+              3.71104559375,
+              3.702752625,
+              3.5627551875,
+              3.572184875,
+              3.60376953125,
+              3.6845546875,
+              3.50612371875
+            ],
+            "recompute_decode_per_token": [
+              18.526421875,
+              18.6518580625,
+              18.5917643125,
+              18.60496484375,
+              18.70733203125,
+              18.7387825625,
+              19.0051236875
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 27.129666,
+            "p95": 28.178346400000002,
+            "mean": 27.343565285714284,
+            "min": 26.652208,
+            "max": 28.184584
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 3.70105859375,
+            "p95": 3.803201840625,
+            "mean": 3.6743887678571427,
+            "min": 3.5369114375,
+            "max": 3.837002625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 30.81540625,
+            "p95": 30.978424359375,
+            "mean": 30.7814535,
+            "min": 30.56401953125,
+            "max": 31.02191146875
+          },
+          "decode_tokens_per_second_p50": 270.192966328257,
+          "decode_speedup_p50": 8.326106023297811,
+          "end_to_end_speedup_p50": 6.774313081597816,
+          "cache_occupied_bytes": 83968,
+          "cache_allocated_bytes": 83968,
+          "raw_timing_ms": {
+            "prefill": [
+              26.796833,
+              28.184584,
+              27.129666,
+              26.792458,
+              26.652208,
+              28.163792,
+              27.685416
+            ],
+            "cached_decode_per_token": [
+              3.70105859375,
+              3.60196875,
+              3.60691146875,
+              3.5369114375,
+              3.837002625,
+              3.72433334375,
+              3.71253515625
+            ],
+            "recompute_decode_per_token": [
+              30.83044921875,
+              30.8769544375,
+              30.56401953125,
+              30.684884125,
+              30.81540625,
+              31.02191146875,
+              30.67654946875
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "KDA_4L",
+      "model_variant": "KDA",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "KDA",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 896400,
+      "attention_parameter_count": 336912,
+      "parameter_bytes": 3585600,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 357.488458,
+        "p95": 369.078802,
+        "mean": 358.20851857684426,
+        "min": 136.112625,
+        "max": 392.7685
+      },
+      "training_tokens_per_second": 2856.6564876515426,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.190717697143555,
+          "validation_loss": 4.193709929784139,
+          "validation_perplexity": 66.26818579637211
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.1916193763415017,
+          "validation_loss": 2.1782824397087097,
+          "validation_perplexity": 8.831125235259869
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 1.9353479444980621,
+          "validation_loss": 1.992535412311554,
+          "validation_perplexity": 7.334105189840535
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 1.8174501458803813,
+          "validation_loss": 1.9176215330759685,
+          "validation_perplexity": 6.804754323332991
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 1.7220162550608318,
+          "validation_loss": 1.87546639641126,
+          "validation_perplexity": 6.523861116299169
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 1.651293158531189,
+          "validation_loss": 1.816527783870697,
+          "validation_perplexity": 6.15046558524412
+        }
+      ],
+      "final_validation_loss": 1.816527783870697,
+      "final_validation_perplexity": 6.15046558524412,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 83968,
+        "bytes_per_token": 0,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 2,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 3,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 4,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 9.573583,
+            "p95": 9.6178749,
+            "mean": 9.520916571428572,
+            "min": 9.370875,
+            "max": 9.62475
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 3.62956903125,
+            "p95": 3.71038373125,
+            "mean": 3.6256596026785712,
+            "min": 3.5521796875,
+            "max": 3.73634115625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 12.3940859375,
+            "p95": 13.380031137499998,
+            "mean": 12.620951830357143,
+            "min": 12.2952109375,
+            "max": 13.67219403125
+          },
+          "decode_tokens_per_second_p50": 275.5148039313104,
+          "decode_speedup_p50": 3.414754156978124,
+          "end_to_end_speedup_p50": 3.1547200618976525,
+          "cache_occupied_bytes": 83968,
+          "cache_allocated_bytes": 83968,
+          "raw_timing_ms": {
+            "prefill": [
+              9.449167,
+              9.370875,
+              9.62475,
+              9.450083,
+              9.573583,
+              9.601833,
+              9.576125
+            ],
+            "cached_decode_per_token": [
+              3.64981640625,
+              3.5521796875,
+              3.62956903125,
+              3.55690625,
+              3.640359375,
+              3.73634115625,
+              3.6144453125
+            ],
+            "recompute_decode_per_token": [
+              12.3940859375,
+              12.3056823125,
+              12.30137890625,
+              12.2952109375,
+              12.67979296875,
+              13.67219403125,
+              12.69831771875
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 15.258042,
+            "p95": 15.6423126,
+            "mean": 15.252184428571429,
+            "min": 15.005041,
+            "max": 15.768375
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 3.5643815,
+            "p95": 3.718341803125,
+            "mean": 3.6118995580357143,
+            "min": 3.53605340625,
+            "max": 3.72124609375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 18.29637890625,
+            "p95": 18.507330078124998,
+            "mean": 18.282836870535714,
+            "min": 17.97092578125,
+            "max": 18.5448125
+          },
+          "decode_tokens_per_second_p50": 280.5535827183482,
+          "decode_speedup_p50": 5.13311465292085,
+          "end_to_end_speedup_p50": 4.527467120843345,
+          "cache_occupied_bytes": 83968,
+          "cache_allocated_bytes": 83968,
+          "raw_timing_ms": {
+            "prefill": [
+              15.348167,
+              15.005041,
+              15.017042,
+              15.258042,
+              15.029833,
+              15.768375,
+              15.338791
+            ],
+            "cached_decode_per_token": [
+              3.53605340625,
+              3.6586328125,
+              3.54034115625,
+              3.5510768125,
+              3.72124609375,
+              3.711565125,
+              3.5643815
+            ],
+            "recompute_decode_per_token": [
+              18.17452865625,
+              17.97092578125,
+              18.3848359375,
+              18.29637890625,
+              18.41987109375,
+              18.18850521875,
+              18.5448125
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 26.979083,
+            "p95": 28.568459,
+            "mean": 27.381018,
+            "min": 26.534958,
+            "max": 28.754834
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 3.695890625,
+            "p95": 4.024519534375,
+            "mean": 3.7109622410714285,
+            "min": 3.50052475,
+            "max": 4.13334765625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 30.18673696875,
+            "p95": 30.301115096875,
+            "mean": 30.044459816964288,
+            "min": 29.75111196875,
+            "max": 30.3215065
+          },
+          "decode_tokens_per_second_p50": 270.5707775104952,
+          "decode_speedup_p50": 8.167648892139496,
+          "end_to_end_speedup_p50": 6.650544973268161,
+          "cache_occupied_bytes": 83968,
+          "cache_allocated_bytes": 83968,
+          "raw_timing_ms": {
+            "prefill": [
+              26.865709,
+              26.534958,
+              28.133584,
+              26.979083,
+              26.567458,
+              28.754834,
+              27.8315
+            ],
+            "cached_decode_per_token": [
+              3.54375909375,
+              3.77058725,
+              3.62808071875,
+              3.70454559375,
+              3.50052475,
+              4.13334765625,
+              3.695890625
+            ],
+            "recompute_decode_per_token": [
+              30.2142995,
+              29.7685299375,
+              29.75111196875,
+              29.8154986875,
+              30.25353515625,
+              30.18673696875,
+              30.3215065
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "GDN_GA_3TO1",
+      "model_variant": "GDN_HYBRID",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "GDN_HYBRID",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 895256,
+      "attention_parameter_count": 335768,
+      "parameter_bytes": 3581024,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 270.219958,
+        "p95": 281.04810425,
+        "mean": 271.28760723770495,
+        "min": 101.62175,
+        "max": 337.60475
+      },
+      "training_tokens_per_second": 3771.933037943687,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.188657323519389,
+          "validation_loss": 4.192129373550415,
+          "validation_perplexity": 66.16352793282107
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.143694758415222,
+          "validation_loss": 2.1283628344535828,
+          "validation_perplexity": 8.401101552497186
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 1.891021768252055,
+          "validation_loss": 1.984381635983785,
+          "validation_perplexity": 7.274547675850555
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 1.792352428038915,
+          "validation_loss": 1.9050704141457875,
+          "validation_perplexity": 6.719880785641559
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 1.6930058002471924,
+          "validation_loss": 1.8610990643501282,
+          "validation_perplexity": 6.430800752683129
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 1.630340983470281,
+          "validation_loss": 1.8106441299120586,
+          "validation_perplexity": 6.114384622092522
+        }
+      ],
+      "final_validation_loss": 1.8106441299120586,
+      "final_validation_perplexity": 6.114384622092522,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 62976,
+        "bytes_per_token": 1024,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 2,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 3,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 4,
+            "type": "gated MHA KV cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 1024,
+            "kv_heads": 4
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 7.098041,
+            "p95": 7.2856784999999995,
+            "mean": 7.129083285714286,
+            "min": 7.022209,
+            "max": 7.329666
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.69962240625,
+            "p95": 2.765642578125,
+            "mean": 2.7119021607142857,
+            "min": 2.68104034375,
+            "max": 2.78586328125
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 9.42349478125,
+            "p95": 9.594618356249999,
+            "mean": 9.455070491071428,
+            "min": 9.37421221875,
+            "max": 9.64838671875
+          },
+          "decode_tokens_per_second_p50": 370.42217373987614,
+          "decode_speedup_p50": 3.4906714210970033,
+          "end_to_end_speedup_p50": 3.225637726256172,
+          "cache_occupied_bytes": 128512,
+          "cache_allocated_bytes": 259584,
+          "raw_timing_ms": {
+            "prefill": [
+              7.329666,
+              7.183041,
+              7.098041,
+              7.053,
+              7.152084,
+              7.065542,
+              7.022209
+            ],
+            "cached_decode_per_token": [
+              2.78586328125,
+              2.717546875,
+              2.69962240625,
+              2.6891041875,
+              2.69167709375,
+              2.7184609375,
+              2.68104034375
+            ],
+            "recompute_decode_per_token": [
+              9.64838671875,
+              9.41296353125,
+              9.42349478125,
+              9.46915884375,
+              9.37421221875,
+              9.4002421875,
+              9.45703515625
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 11.556542,
+            "p95": 11.9687793,
+            "mean": 11.625559571428571,
+            "min": 11.413916,
+            "max": 12.081042
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.7203815,
+            "p95": 2.7343377718749995,
+            "mean": 2.712641183035714,
+            "min": 2.673602875,
+            "max": 2.73738934375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 13.915509125,
+            "p95": 13.950586471874999,
+            "mean": 13.924184714285715,
+            "min": 13.90474478125,
+            "max": 13.952134125
+          },
+          "decode_tokens_per_second_p50": 367.5955008516269,
+          "decode_speedup_p50": 5.115278546409759,
+          "end_to_end_speedup_p50": 4.515788832126967,
+          "cache_occupied_bytes": 161280,
+          "cache_allocated_bytes": 259584,
+          "raw_timing_ms": {
+            "prefill": [
+              11.706833,
+              11.514417,
+              11.637084,
+              11.469083,
+              11.556542,
+              11.413916,
+              12.081042
+            ],
+            "cached_decode_per_token": [
+              2.73738934375,
+              2.7051263125,
+              2.7203815,
+              2.7038359375,
+              2.673602875,
+              2.7272174375,
+              2.720934875
+            ],
+            "recompute_decode_per_token": [
+              13.915509125,
+              13.952134125,
+              13.9098893125,
+              13.93303125,
+              13.94697528125,
+              13.90474478125,
+              13.907009125
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 20.6095,
+            "p95": 21.2447669,
+            "mean": 20.688071428571426,
+            "min": 20.391875,
+            "max": 21.490292
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.7233763125,
+            "p95": 2.8322268187499997,
+            "mean": 2.7457710223214287,
+            "min": 2.7028125,
+            "max": 2.85211978125
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 22.8641745,
+            "p95": 23.12832316875,
+            "mean": 22.93296689285714,
+            "min": 22.8113919375,
+            "max": 23.17768096875
+          },
+          "decode_tokens_per_second_p50": 367.19126747563644,
+          "decode_speedup_p50": 8.395525214439127,
+          "end_to_end_speedup_p50": 6.78981322717996,
+          "cache_occupied_bytes": 226816,
+          "cache_allocated_bytes": 259584,
+          "raw_timing_ms": {
+            "prefill": [
+              20.671875,
+              20.6095,
+              20.650958,
+              20.462958,
+              20.391875,
+              20.539042,
+              21.490292
+            ],
+            "cached_decode_per_token": [
+              2.7233763125,
+              2.7028125,
+              2.72702734375,
+              2.720821625,
+              2.7084296875,
+              2.78580990625,
+              2.85211978125
+            ],
+            "recompute_decode_per_token": [
+              22.85887759375,
+              22.82738803125,
+              23.17768096875,
+              22.97810025,
+              22.8113919375,
+              22.8641745,
+              23.01315496875
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "KDA_MLA_3TO1",
+      "model_variant": "KDA_HYBRID",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "KDA_HYBRID",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 857292,
+      "attention_parameter_count": 297804,
+      "parameter_bytes": 3429168,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 274.022792,
+        "p95": 280.85234325,
+        "mean": 274.877179255123,
+        "min": 104.632834,
+        "max": 299.588333
+      },
+      "training_tokens_per_second": 3722.6760377035516,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.193268299102783,
+          "validation_loss": 4.196091214815776,
+          "validation_perplexity": 66.42617727199298
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.2084957559903464,
+          "validation_loss": 2.1920142571131387,
+          "validation_perplexity": 8.953229069563818
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 1.9696260690689087,
+          "validation_loss": 2.014471252759298,
+          "validation_perplexity": 7.4967624406149636
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 1.8410585323969524,
+          "validation_loss": 1.9407526552677155,
+          "validation_perplexity": 6.96399048273789
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 1.747665524482727,
+          "validation_loss": 1.8916359345118205,
+          "validation_perplexity": 6.630206397194736
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 1.6800483564535778,
+          "validation_loss": 1.831549048423767,
+          "validation_perplexity": 6.243550733955001
+        }
+      ],
+      "final_validation_loss": 1.831549048423767,
+      "final_validation_perplexity": 6.243550733955001,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 62976,
+        "bytes_per_token": 128,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 2,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 3,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 4,
+            "type": "MLA latent cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 128,
+            "latent_rank": 32
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 7.189916,
+            "p95": 7.3614668000000005,
+            "mean": 7.247553428571429,
+            "min": 7.156583,
+            "max": 7.371167
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.76549609375,
+            "p95": 2.8456618625,
+            "mean": 2.7693365,
+            "min": 2.72080340625,
+            "max": 2.8707981875
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 9.50910678125,
+            "p95": 9.71353580625,
+            "mean": 9.556303388392857,
+            "min": 9.4546393125,
+            "max": 9.7417018125
+          },
+          "decode_tokens_per_second_p50": 361.5987750841494,
+          "decode_speedup_p50": 3.438481364244379,
+          "end_to_end_speedup_p50": 3.180110796178714,
+          "cache_occupied_bytes": 71168,
+          "cache_allocated_bytes": 87552,
+          "raw_timing_ms": {
+            "prefill": [
+              7.371167,
+              7.189916,
+              7.156583,
+              7.1765,
+              7.164625,
+              7.33525,
+              7.338833
+            ],
+            "cached_decode_per_token": [
+              2.8707981875,
+              2.74315234375,
+              2.72080340625,
+              2.7744609375,
+              2.72363409375,
+              2.7870104375,
+              2.76549609375
+            ],
+            "recompute_decode_per_token": [
+              9.530540375,
+              9.4546393125,
+              9.50823175,
+              9.5020885625,
+              9.50910678125,
+              9.7417018125,
+              9.647815125
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 11.701417,
+            "p95": 11.7775419,
+            "mean": 11.693637142857142,
+            "min": 11.61125,
+            "max": 11.795667
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.7543111875,
+            "p95": 2.772287503125,
+            "mean": 2.7533128749999998,
+            "min": 2.7236953125,
+            "max": 2.77715625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 14.033181,
+            "p95": 14.066186725,
+            "mean": 14.014941406250001,
+            "min": 13.93778515625,
+            "max": 14.06763671875
+          },
+          "decode_tokens_per_second_p50": 363.067181565518,
+          "decode_speedup_p50": 5.094987474068778,
+          "end_to_end_speedup_p50": 4.497842579643553,
+          "cache_occupied_bytes": 75264,
+          "cache_allocated_bytes": 87552,
+          "raw_timing_ms": {
+            "prefill": [
+              11.653792,
+              11.701417,
+              11.795667,
+              11.716959,
+              11.73525,
+              11.61125,
+              11.641125
+            ],
+            "cached_decode_per_token": [
+              2.7236953125,
+              2.77715625,
+              2.74710415625,
+              2.76092709375,
+              2.754181,
+              2.755815125,
+              2.7543111875
+            ],
+            "recompute_decode_per_token": [
+              13.93778515625,
+              13.9758333125,
+              14.0396796875,
+              14.06280340625,
+              14.06763671875,
+              14.033181,
+              13.9876705625
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 20.714625,
+            "p95": 21.0196124,
+            "mean": 20.75344642857143,
+            "min": 20.473583,
+            "max": 21.074375
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.76297915625,
+            "p95": 2.7824609375,
+            "mean": 2.762698482142857,
+            "min": 2.7405859375,
+            "max": 2.787875
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 23.3199205625,
+            "p95": 23.924712999999997,
+            "mean": 23.36966424107143,
+            "min": 23.03829034375,
+            "max": 24.018903625
+          },
+          "decode_tokens_per_second_p50": 361.9281737026314,
+          "decode_speedup_p50": 8.440136260076065,
+          "end_to_end_speedup_p50": 6.83806235864216,
+          "cache_occupied_bytes": 83456,
+          "cache_allocated_bytes": 87552,
+          "raw_timing_ms": {
+            "prefill": [
+              20.714625,
+              20.473583,
+              20.891833,
+              21.074375,
+              20.690792,
+              20.695834,
+              20.733083
+            ],
+            "cached_decode_per_token": [
+              2.769828125,
+              2.7405859375,
+              2.76297915625,
+              2.75245184375,
+              2.787875,
+              2.758752625,
+              2.7664166875
+            ],
+            "recompute_decode_per_token": [
+              23.0479323125,
+              23.704934875,
+              24.018903625,
+              23.3199205625,
+              23.0891705625,
+              23.36849740625,
+              23.03829034375
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "variant": "K3_KDA_GMLA_3TO1",
+      "model_variant": "KDA_GATED_MLA_HYBRID",
+      "model_config": {
+        "vocab_size": 65,
+        "block_size": 192,
+        "n_layer": 4,
+        "n_head": 4,
+        "n_embd": 128,
+        "dropout": 0.0,
+        "bias": false,
+        "attention_variant": "KDA_GATED_MLA_HYBRID",
+        "gqa_n_kv_heads": 2,
+        "mla_latent_rank": 32,
+        "delta_conv_kernel": 4,
+        "kda_gate_rank": 32
+      },
+      "parameter_count": 873676,
+      "attention_parameter_count": 314188,
+      "parameter_bytes": 3494704,
+      "training_mode": "full_epoch",
+      "training_epochs": 1,
+      "training_steps": 981,
+      "training_tokens": 1003840,
+      "training_ms_per_step": {
+        "p50": 276.1972915,
+        "p95": 287.65201025,
+        "mean": 277.8181955184426,
+        "min": 104.902459,
+        "max": 311.404042
+      },
+      "training_tokens_per_second": 3683.267349048277,
+      "training_history": [
+        {
+          "step": 0,
+          "tokens_seen": 0,
+          "train_loss": 4.192124764124553,
+          "validation_loss": 4.195506731669108,
+          "validation_perplexity": 66.38736363494327
+        },
+        {
+          "step": 200,
+          "tokens_seen": 204800,
+          "train_loss": 2.206157843271891,
+          "validation_loss": 2.19348281621933,
+          "validation_perplexity": 8.966387074933259
+        },
+        {
+          "step": 400,
+          "tokens_seen": 409600,
+          "train_loss": 1.960173894961675,
+          "validation_loss": 2.0139213303724923,
+          "validation_perplexity": 7.492640936477869
+        },
+        {
+          "step": 600,
+          "tokens_seen": 614400,
+          "train_loss": 1.8512769043445587,
+          "validation_loss": 1.9401979545752208,
+          "validation_perplexity": 6.960128623581585
+        },
+        {
+          "step": 800,
+          "tokens_seen": 819200,
+          "train_loss": 1.7497024933497112,
+          "validation_loss": 1.8967851201693218,
+          "validation_perplexity": 6.6644346089624795
+        },
+        {
+          "step": 981,
+          "tokens_seen": 1003840,
+          "train_loss": 1.67294043302536,
+          "validation_loss": 1.8294155200322468,
+          "validation_perplexity": 6.2302441412444525
+        }
+      ],
+      "final_validation_loss": 1.8294155200322468,
+      "final_validation_perplexity": 6.2302441412444525,
+      "shared_backbone_initialization": true,
+      "cache_layout": {
+        "law": "fixed_bytes + bytes_per_token * context_tokens",
+        "fixed_bytes": 62976,
+        "bytes_per_token": 128,
+        "layers": [
+          {
+            "layer": 1,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 2,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 3,
+            "type": "DeltaStateCache",
+            "fixed_bytes": 20992,
+            "bytes_per_token": 0,
+            "recurrent_state_bytes": 16384,
+            "convolution_history_bytes": 4608
+          },
+          {
+            "layer": 4,
+            "type": "gated MLA latent cache",
+            "fixed_bytes": 0,
+            "bytes_per_token": 128,
+            "latent_rank": 32
+          }
+        ]
+      },
+      "inference": [
+        {
+          "prompt_length": 32,
+          "decode_tokens": 32,
+          "total_sequence_length": 64,
+          "prefill_ms": {
+            "p50": 7.429958,
+            "p95": 7.715742,
+            "mean": 7.456899,
+            "min": 7.220125,
+            "max": 7.798542
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.87475259375,
+            "p95": 2.9428906249999995,
+            "mean": 2.8871103035714287,
+            "min": 2.854265625,
+            "max": 2.96537890625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 9.82060028125,
+            "p95": 9.86392500625,
+            "mean": 9.75706734375,
+            "min": 9.60537240625,
+            "max": 9.86487109375
+          },
+          "decode_tokens_per_second_p50": 347.8560214795876,
+          "decode_speedup_p50": 3.4161549423769437,
+          "end_to_end_speedup_p50": 3.160860568130964,
+          "cache_occupied_bytes": 71168,
+          "cache_allocated_bytes": 87552,
+          "raw_timing_ms": {
+            "prefill": [
+              7.220125,
+              7.421042,
+              7.496292,
+              7.522542,
+              7.309792,
+              7.798542,
+              7.429958
+            ],
+            "cached_decode_per_token": [
+              2.884609375,
+              2.87475259375,
+              2.86597396875,
+              2.96537890625,
+              2.89041796875,
+              2.854265625,
+              2.8743736875
+            ],
+            "recompute_decode_per_token": [
+              9.60537240625,
+              9.64348046875,
+              9.86487109375,
+              9.665009125,
+              9.82060028125,
+              9.86171746875,
+              9.8384205625
+            ]
+          }
+        },
+        {
+          "prompt_length": 64,
+          "decode_tokens": 32,
+          "total_sequence_length": 96,
+          "prefill_ms": {
+            "p50": 11.918125,
+            "p95": 12.43685,
+            "mean": 11.922994000000001,
+            "min": 11.348,
+            "max": 12.467375
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.902865875,
+            "p95": 2.939475509375,
+            "mean": 2.8881426741071428,
+            "min": 2.81263934375,
+            "max": 2.94875909375
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 14.4320611875,
+            "p95": 14.685522268749999,
+            "mean": 14.439166482142857,
+            "min": 14.228303375,
+            "max": 14.71816796875
+          },
+          "decode_tokens_per_second_p50": 344.487152717657,
+          "decode_speedup_p50": 4.9716596663288835,
+          "end_to_end_speedup_p50": 4.406322811333933,
+          "cache_occupied_bytes": 75264,
+          "cache_allocated_bytes": 87552,
+          "raw_timing_ms": {
+            "prefill": [
+              11.758125,
+              11.996458,
+              11.918125,
+              12.365625,
+              11.60725,
+              12.467375,
+              11.348
+            ],
+            "cached_decode_per_token": [
+              2.89220703125,
+              2.81263934375,
+              2.902865875,
+              2.83884896875,
+              2.9178138125,
+              2.94875909375,
+              2.90386459375
+            ],
+            "recompute_decode_per_token": [
+              14.4320611875,
+              14.27322528125,
+              14.71816796875,
+              14.228303375,
+              14.60934896875,
+              14.47021484375,
+              14.34284375
+            ]
+          }
+        },
+        {
+          "prompt_length": 128,
+          "decode_tokens": 32,
+          "total_sequence_length": 160,
+          "prefill_ms": {
+            "p50": 20.984459,
+            "p95": 21.698675,
+            "mean": 21.102744,
+            "min": 20.723125,
+            "max": 21.91625
+          },
+          "cached_decode_ms_per_token": {
+            "p50": 2.83815234375,
+            "p95": 2.931603515625,
+            "mean": 2.8539998125,
+            "min": 2.77754165625,
+            "max": 2.94191015625
+          },
+          "recompute_decode_ms_per_token": {
+            "p50": 23.7211796875,
+            "p95": 23.93724830625,
+            "mean": 23.600381700892857,
+            "min": 23.12345571875,
+            "max": 23.9959205625
+          },
+          "decode_tokens_per_second_p50": 352.34190377487556,
+          "decode_speedup_p50": 8.357965610879658,
+          "end_to_end_speedup_p50": 6.789280286037158,
+          "cache_occupied_bytes": 83456,
+          "cache_allocated_bytes": 87552,
+          "raw_timing_ms": {
+            "prefill": [
+              21.91625,
+              20.977208,
+              20.723125,
+              21.146375,
+              21.191,
+              20.780791,
+              20.984459
+            ],
+            "cached_decode_per_token": [
+              2.94191015625,
+              2.83815234375,
+              2.8002890625,
+              2.901921875,
+              2.9075546875,
+              2.81062890625,
+              2.77754165625
+            ],
+            "recompute_decode_per_token": [
+              23.7446263125,
+              23.7211796875,
+              23.9959205625,
+              23.800346375,
+              23.12345571875,
+              23.40145703125,
+              23.41568621875
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

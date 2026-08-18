@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transformer-attention-lab"
+version = "0.1.0"
+description = "Controlled PyTorch experiments for Transformer and recurrent attention architectures."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "attention",
+    "cuda",
+    "gated-deltanet",
+    "kda",
+    "kv-cache",
+    "linear-attention",
+    "llm",
+    "pytorch",
+    "transformers",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "matplotlib>=3.8",
+    "torch>=2.10",
+]
+
+[project.urls]
+Repository = "https://github.com/vladislav-vasilenko/transformer-attention-lab"
+Issues = "https://github.com/vladislav-vasilenko/transformer-attention-lab/issues"
+
+[project.optional-dependencies]
+cuda = ["flash-linear-attention[cuda]==0.5.1"]
+dev = ["ruff>=0.15"]
+notebooks = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.1",
+    "pandas>=2.2",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["research*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"

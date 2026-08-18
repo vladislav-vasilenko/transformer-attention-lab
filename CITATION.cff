@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software or its experimental results, please cite it using this metadata."
+title: "Transformer Attention Lab"
+type: software
+authors:
+  - family-names: "Vasilenko"
+    given-names: "Vladislav"
+version: 0.1.0
+date-released: 2026-08-18
+repository-code: "https://github.com/vladislav-vasilenko/transformer-attention-lab"
+abstract: >-
+  A controlled PyTorch study of quality, training, prefill, decode, and
+  persistent-memory trade-offs among MHA, GQA, MQA, MLA-style attention,
+  Gated DeltaNet, Kimi Delta Attention, and recurrent-attention hybrids.
+keywords:
+  - transformer attention
+  - linear attention
+  - KV cache
+  - CUDA benchmarking
+license: MIT

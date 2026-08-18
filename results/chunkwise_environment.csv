@@ -1,0 +1,2 @@
+gpu,compute_capability,torch,fla,dtype,batch,heads,head_dim
+Tesla T4,7.5,2.11.0+cu128,0.5.1,torch.float16,8,4,32

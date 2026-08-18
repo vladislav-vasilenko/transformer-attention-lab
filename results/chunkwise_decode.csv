@@ -1,0 +1,4 @@
+operator,prompt_tokens,decode_tokens,p50_ms_per_token,p95_ms_per_token
+MHA SDPA,4096,128,0.2879559140625,0.2912822421875
+GDN fused recurrent,4096,128,0.2783936484375,0.313820109375
+KDA fused recurrent,4096,128,0.2403435859375,0.2437273125
