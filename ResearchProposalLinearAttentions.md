@@ -1,0 +1,282 @@
+# Presentation brief — Efficient Linear Attention Systems
+
+## Mission
+
+Create an English 16:9 research presentation from this repository. The talk
+should make one precise argument:
+
+> Recurrent linear-attention mechanisms can drastically reduce persistent
+> inference state, but their realized speed is a property of the execution
+> kernel and the surrounding model. A Python token-by-token reference scan
+> exaggerates their slowdown; optimized CUDA kernels expose the remaining
+> full-model prefill-versus-decode-versus-state trade-off.
+
+This is an engineering research project and a controlled prototype study, not a
+new architecture paper, a production benchmark, or a reproduction of full
+Qwen3-Next, Kimi Linear, DeepSeek, or Kimi K3 models.
+
+## Non-negotiable evidence boundary
+
+There are **three separate evidence sets**. Keep their hardware, scope, graphs,
+and numerical claims separate on every slide.
+
+| Evidence set | What was measured | Correct use | Never claim |
+|---|---|---|---|
+| **CPU full-model reference experiment** | 4-layer nanoGPT training, validation PPL, measured recurrent/KV state, and cached/recomputed decode timing | Quality–memory trade-off; diagnosis of the unoptimized reference implementation | That GDN/KDA architectures are intrinsically 9× slower, or that this is a CUDA benchmark |
+| **CUDA kernel microbenchmark** | Attention operator prefill, forward + backward at 64 tokens, and cached decode after a 4K prefix | Demonstrates the effect of FLA chunkwise/recurrent kernels | Full-GPT training throughput, PPL, AdamW step time, or a direct CPU-versus-GPU comparison |
+| **CUDA full-model microbenchmark** | The nine 4-layer models: full train step, cached prefill, and cached decode; GDN/KDA run with FLA | Direct CUDA performance comparison of the implemented token mixers | CUDA PPL, retraining, matched parameters, or production-model performance |
+
+Use the labels **“CPU full-model reference path”** and **“CUDA attention-operator microbenchmark”** verbatim. Do not merge their bars, axes, or tables.
+
+## Source of truth and visual assets
+
+All paths below are relative to this Markdown file.
+
+| Asset | Role in deck | Evidence class |
+|---|---|---|
+| [`results/hybrid_quality_efficiency.png`](results/hybrid_quality_efficiency.png) | CPU figure: quality vs persistent state, quality vs reference decode latency, and unoptimized training throughput | Measured CPU prototype; third panel is explicitly a reference-path diagnostic |
+| [`results/hybrid_state_scaling.png`](results/hybrid_state_scaling.png) | Long-context state/cache scaling and concurrency under a 1 GiB state budget | Exact storage-law projection beyond the marked 160-token measurements |
+| [`results/cuda_chunkwise_operator_benchmark.png`](results/cuda_chunkwise_operator_benchmark.png) | CUDA prefill, attention forward+backward, and 4K-prefix decode comparison | Measured CUDA operator microbenchmark |
+| [`results/CUDA_CHUNKWISE_SUMMARY.md`](results/CUDA_CHUNKWISE_SUMMARY.md) | Exact CUDA numbers, environment, and scope caveat | Primary local result summary |
+| [`Skoltech_presentation_evidence/cuda_full_model_comparison.png`](Skoltech_presentation_evidence/cuda_full_model_comparison.png) | Main CUDA comparison; all nine full 4-layer models | Measured CUDA full-model microbenchmark on Tesla T4 |
+| [`Skoltech_presentation_evidence/CUDA_FULL_MODEL_SUMMARY.md`](Skoltech_presentation_evidence/CUDA_FULL_MODEL_SUMMARY.md) | Exact full-model CUDA winners, environment, verification status, and scope | Primary T4 result summary; all five verification rows passed |
+| [`Skoltech_presentation_evidence/cuda_full_model_*.csv`](Skoltech_presentation_evidence/) | Raw full-model T4 training, prefill, decode, verification, and environment data | Provenance for the main CUDA chart; do not redraw without preserving scope footnotes |
+| [`results/HYBRID_EXPERIMENT_SUMMARY.md`](results/HYBRID_EXPERIMENT_SUMMARY.md) | Exact CPU/PPL/state numbers and experiment limitations | Primary local result summary |
+| [`results/hybrid_architectures.png`](results/hybrid_architectures.png) | Optional implementation/schedule diagram | Implemented prototype topology |
+| [`results/chunkwise_*.csv`](results/) | Raw CUDA data; use only if a figure must be redrawn | Raw measurements |
+
+Do not use the old CPU throughput panel as the headline visual. Its purpose is
+to establish the problem that the CUDA experiment resolves.
+
+The full-model T4 chart supersedes the operator-only CUDA chart as the **main
+performance visual**. Keep the operator chart in the appendix or use it
+briefly to explain why the reference path was misleading.
+
+## Experiment evolution and completed T4 experiment
+
+### What changed in the research design
+
+The experiment was deliberately strengthened in three stages rather than
+silently replacing an inconvenient CPU result.
+
+| Stage | Implementation and scope | Resulting interpretation |
+|---|---|---|
+| **1 — CPU reference path** | Nine 4-layer nanoGPT variants were trained for one full epoch. GDN/KDA used an exact but sequential Python/PyTorch recurrence. | The quality and state-memory findings are valid; the recurrent throughput bars diagnose reference-path overhead. |
+| **2 — CUDA operator kernels** | On a Tesla T4, FLA chunkwise GDN/KDA and fused recurrent decode were compared with PyTorch SDPA on matched token-mixer shapes. | The large CPU speed gap is largely kernel/implementation overhead, not an architecture ranking. |
+| **3 — CUDA full model** | The Colab run placed the FLA route inside the same 4-layer GPT decoder and timed all nine implemented systems. | This is the direct CUDA **performance** comparison across the complete project variant set. It does not replace CPU PPL/state results. |
+
+The new `fla` execution backend changes only how GDN/KDA equations are run on
+CUDA:
+
+- full sequences use FLA **chunkwise** GDN/KDA kernels for training and
+  prefill;
+- after a sufficiently initialized cache, one-token decode uses FLA **fused
+  recurrent** kernels;
+- on the T4, the first 64 cached tokens intentionally remain on the
+  numerically equivalent chunkwise route, because the fused GDN kernel was not
+  finite for short prefixes. This does not affect the benchmarked decode
+  setting, which begins after a 4K-token chunkwise prefill;
+- MHA, GQA, MQA, and MLA-style layers still use PyTorch SDPA; GQA uses native
+  SDPA GQA where the active backend supports it and otherwise an explicit
+  compatibility expansion.
+
+### Completed T4 CUDA full-model run
+
+**Status:** completed successfully on a Tesla T4 (compute capability 7.5),
+with PyTorch 2.11.0+cu128, FLA 0.5.1, and FP16. The reproducible command was:
+
+```bash
+python -m research.cuda_full_model_benchmark --output-dir results --dtype auto
+```
+
+All five FLA/reference numerical checks passed before timing: pure GDN, pure
+KDA, and the three recurrent-containing hybrid schedules. The largest absolute
+full-sequence-logit error was **0.00128174**; the largest cached-logit error
+was **0.00122070**. These are reduced-precision equivalence checks, not a
+quality result.
+
+The completed run produced:
+
+1. `cuda_full_model_verification.csv` — full-sequence and cached-logit error;
+2. `cuda_full_model_training.csv` — 64-token, full GPT forward + loss +
+   backward + AdamW p50/p95 throughput;
+3. `cuda_full_model_prefill.csv` — full GPT cached prefill at 64/256/1K/4K;
+4. `cuda_full_model_decode.csv` — cached decode after a 4K prefix;
+5. `cuda_full_model_environment.csv` — GPU, FLA/PyTorch versions, precision,
+   and complete benchmark configuration.
+
+The five CSVs, `cuda_full_model_comparison.png`, and
+`CUDA_FULL_MODEL_SUMMARY.md` are in `Skoltech_presentation_evidence/`. Use that
+directory as the hand-off bundle for the presentation agent. Do not substitute
+the earlier CPU or attention-operator numbers for these full-model results.
+
+### Results available now
+
+The following conclusions are already measured and can be presented now:
+
+- **State/quality:** in the controlled CPU run, pure GDN achieved PPL 5.91
+  with 82.0 KiB state, versus MHA PPL 8.44 with 640.0 KiB at 160 tokens.
+  The KDA/MLA hybrid projects to 16.06 MiB at 128K context versus 64.00 MiB for
+  four MLA-style layers; this is a storage-law projection, not a long-context
+  quality/latency run.
+- **Why the CPU bars were misleading:** GDN/KDA CPU reference training was
+  about 9× below MHA because it scanned tokens in Python/PyTorch rather than
+  using a chunkwise kernel.
+- **Kernel effect:** on the separate T4 attention-operator benchmark,
+  chunkwise GDN/KDA prefill at 64 tokens was 21.1×/13.9× faster than its
+  reference scan; attention forward + backward was 21.9×/21.1× faster.
+- **Remaining systems trade-off:** at 4K operator prefill, MHA SDPA was still
+  fastest (7.64M tok/s), while KDA chunkwise reached 5.96M tok/s. After a 4K
+  prefix, KDA had the lowest operator decode p50: 0.240 ms/token versus MHA
+  0.288 ms/token.
+
+### Completed CUDA full-model findings
+
+- **Full training step, 64-token windows:** MHA is fastest at **138,007 tok/s**
+  p50. MLA-style follows at **129,696 tok/s**; GDN reaches **32,946 tok/s** and
+  KDA **21,303 tok/s**. This scope includes the full decoder, vocabulary loss,
+  backward pass, and AdamW at batch 16.
+- **Cached 4K prefill:** MLA-style is fastest at **1.25M tok/s** p50; MHA is
+  **1.17M tok/s**. The recurrent systems are slower but substantial: KDA is
+  **660,611 tok/s** and GDN **584,688 tok/s** at inference batch 8.
+- **Cached decode after a 4K prefix:** MLA-style is lowest at **2.140
+  ms/token** p50, followed by MHA at **2.410 ms/token**. GDN and KDA are
+  **6.726** and **6.888 ms/token**, respectively. The operator-level KDA decode
+  advantage therefore does not carry over to the whole decoder on this T4.
+- **State trade-off remains visible:** GDN/KDA each occupy **598,016 bytes** of
+  decode cache at this setting, versus **69,206,016 bytes** for MHA: about
+  **116× smaller**. MLA-style occupies **8,650,752 bytes**. This is measured
+  cache occupancy for batch 8 after a 4K prefix, not a production serving claim.
+
+Keep the CPU quality/state, CUDA operator, and CUDA full-model result panels
+visibly separate.
+
+## Facts and numbers that may be stated
+
+### CPU full-model reference experiment
+
+- Controlled 4-layer nanoGPT run on CPU; each of nine variants saw
+  **1,003,840 training tokens**.
+- At 160 tokens, pure Gated DeltaNet (GDN) reached validation PPL **5.91** with
+  **82.0 KiB** persistent state; pure KDA reached PPL **6.15** with the same
+  **82.0 KiB** state. MHA used **640.0 KiB** and reached PPL **8.44**.
+- The reported recurrent training rates were GDN **2,954 tok/s** and KDA
+  **2,857 tok/s**, against MHA **26,939 tok/s**. This gap is caused by the
+  sequential PyTorch/Python reference scan, which has no fused chunkwise
+  kernel.
+- At 128K context, the KDA + MLA-style hybrid storage law gives **16.06 MiB**
+  state versus **64.00 MiB** for four MLA-style layers: **3.99× smaller**.
+  This is an exact storage-layout projection, **not** a 128K quality or latency
+  measurement.
+
+### CUDA chunkwise kernel microbenchmark
+
+Environment: **Tesla T4**, compute capability 7.5, PyTorch 2.11.0+cu128,
+Flash Linear Attention (FLA) 0.5.1, FP16, batch 8, 4 heads × head dimension 32.
+
+- At 64 tokens of prefill, FLA chunkwise is **21.1×** faster than the GDN
+  reference scan and **13.9×** faster than the KDA reference scan.
+- At 64 tokens for the attention operator’s forward + backward pass,
+  chunkwise is **21.9×** faster for GDN and **21.1×** faster for KDA than their
+  reference paths.
+- At 4K prefill, MHA SDPA is still fastest at **7.64M tok/s**. GDN chunkwise
+  reaches **4.19M tok/s** (1.82× below MHA); KDA chunkwise reaches
+  **5.96M tok/s** (1.28× below MHA).
+- After a 4K-token prefix, p50 decode latency is **0.288 ms/token** for MHA,
+  **0.278 ms/token** for GDN, and **0.240 ms/token** for KDA. KDA is therefore
+  **16.5% lower latency** than MHA (not “16.5 percentage points” and not
+  “19.8% lower”).
+
+## Recommended 8-slide story
+
+Keep the main deck to 7–8 minutes. One conclusion per slide. Use short text,
+large diagrams/plots, and a small evidence footer on every result slide.
+
+| # | Slide title | Main message | Required visual and footer |
+|---:|---|---|---|
+| 1 | **Efficient Transformer Systems** | I studied the quality–state–speed trade-off of attention and recurrent token mixers in one controlled decoder. | Minimal title slide. Subtitle: “Memory efficiency is measurable; realized speed depends on the kernel.” |
+| 2 | **Why the KV cache becomes a systems problem** | Standard attention keeps per-token K/V state; shared, latent, and recurrent alternatives alter that scaling. | Simple cache-growth diagram or `hybrid_architectures.png`. Mark architecture facts as literature/background. |
+| 3 | **A controlled implementation study** | I implemented nine token mixers/schedules in the same 4-layer nanoGPT backbone and held the data schedule fixed. | `hybrid_architectures.png` or a clean redraw. Footer: “CPU full-model reference experiment; 1,003,840 tokens/variant.” |
+| 4 | **Memory efficiency is real** | Recurrent GDN/KDA state is fixed; the KDA+MLA hybrid reaches 16.06 MiB at 128K versus 64.00 MiB for MLA-style. | Left half of `hybrid_state_scaling.png`; retain its “projection” disclaimer. |
+| 5 | **The first speed result was an implementation warning** | The CPU chart shows the reference scan overhead, not an architecture verdict. | Right throughput panel of `hybrid_quality_efficiency.png`, visibly labelled “CPU full-model reference path / token-by-token Python scan.” Mention PPL/state from the first panel only if legible. |
+| 6 | **Chunkwise CUDA kernels explain the CPU anomaly** | The operator-level FLA result removes 14–22× of the short-window reference-scan penalty. | `cuda_chunkwise_operator_benchmark.png`. Footer: “Tesla T4, FP16, B=8, H=4, D=32; attention operator only.” |
+| 7 | **All nine models: CUDA full-model comparison** | On this T4, MHA leads training while MLA-style leads 4K prefill and decode; recurrent GDN/KDA retain much smaller decode state. | `cuda_full_model_comparison.png`. Footer: “Tesla T4, FP16; 5/5 FLA checks passed; random-token performance microbenchmark, no CUDA PPL claim.” |
+| 8 | **Conclusions, limitations, next test** | State savings and kernel sensitivity are supported; multi-seed quality and long-context quality remain next work. | Three evidence boxes: measured / projection / next test. Add programme/research fit only if this is an admissions deck. |
+
+For a shorter six-slide technical deck, combine slides 2+3 and slides 7+8; do
+not remove slide 6 or the evidence boundary.
+
+## Slide-specific speaker guidance
+
+### Slide 4 — memory
+
+Say: “The x-markers are measured states at 160 tokens. The longer-context lines
+are exact byte-count projections of the implemented cache layout, not an
+assertion that we measured 128K quality or latency.”
+
+### Slide 5 — CPU reference path
+
+Say: “This surprising 9× gap is the result that changed the experiment. GDN
+and KDA are evaluated by a sequential Python reference recurrence, while MHA
+uses optimized attention primitives. It diagnoses an execution-path mismatch.”
+
+Do **not** say: “Linear attention is 9× slower than attention.”
+
+### Slide 6 — CUDA kernels
+
+Say: “With the appropriate CUDA kernels, the short-window reference-scan
+penalty is mostly removed: roughly 14–22×. MHA remains faster for 4K prefill on
+this T4 microbenchmark, but KDA is close and has the lowest cached decode
+latency.”
+
+Do **not** say: “KDA is universally faster,” “this measures a full LLM,” or
+“CUDA proves the CPU quality result.”
+
+### Slide 7 — full-model CUDA comparison
+
+Say: “All nine implemented mixers now share one full-decoder CUDA timing scope.
+On this Tesla T4, MHA leads the 64-token training step, while MLA-style leads
+4K prefill and cached decode. GDN and KDA instead demonstrate the smallest
+recurrent state. This measures random-token performance, not a new quality
+run.” The slide must carry **Tesla T4, FP16, train batch 16, inference batch
+8**, and **5/5 FLA/reference checks passed**.
+
+## Visual and editorial rules
+
+- Deck language: **English**. Explain abbreviations at first appearance:
+  multi-head attention (MHA), Gated DeltaNet (GDN), Kimi Delta Attention (KDA),
+  and multi-head latent attention (MLA-style).
+- Preserve units exactly: `tok/s`, `ms/token`, `KiB`, `MiB`, `128K tokens`.
+- If redrawing charts, preserve log axes where present and copy the hardware and
+  scope footnotes. Never interpolate extra data points.
+- Do not use the word “fused” for the reference scan. The relevant terms are
+  **chunkwise kernel** for GDN/KDA prefill/training and **fused recurrent
+  kernel** for cached decode.
+- Do not place CPU and CUDA numeric bars on a shared axis. Do not compare their
+  absolute tok/s values.
+- Make “measured”, “exact storage projection”, and “proposed next work” visibly
+  distinct (for example: filled marks, dashed lines, and outlined boxes).
+- Do not claim matched parameter counts, production throughput, long-context
+  accuracy, MoE behavior, or results for the full external architectures.
+
+## Final conclusion slide copy
+
+Use this wording, or a faithful shorter version:
+
+> Recurrent linear attention offers a genuine state-memory advantage. The first
+> CPU benchmark revealed that an unoptimized reference scan can obscure that
+> advantage. The completed CUDA experiment shows the more nuanced result:
+> optimized kernels enable a fair comparison, but on this T4 the full decoder
+> still favors MHA/MLA for speed while GDN/KDA retain a much smaller cache. The
+> next test is multi-seed quality training and scaling in one backbone.
+
+## Appendix candidates
+
+1. Full `hybrid_quality_efficiency.png` with all three CPU panels.
+2. Full `hybrid_state_scaling.png`, including the 1 GiB concurrency projection.
+3. Method details: shared corpus/seed/optimizer and the nine variants.
+4. CUDA environment and raw CSV provenance:
+   `chunkwise_environment.csv`, `chunkwise_prefill.csv`,
+   `chunkwise_training.csv`, `chunkwise_decode.csv`.
+5. Full-model CUDA provenance: all five `cuda_full_model_*.csv` files,
+   including verification, environment, training, prefill, and decode.
